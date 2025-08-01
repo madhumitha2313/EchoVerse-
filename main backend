@@ -1,0 +1,132 @@
+import os
+import sqlite3
+import requests
+import openai
+from flask import Flask, render_template, request, redirect, session, jsonify
+from werkzeug.security import generate_password_hash, check_password_hash
+
+app = Flask(__name__)
+app.secret_key = os.getenv("SECRET_KEY", "change-me-secret")
+openai.api_key = os.getenv("OPENAI_API_KEY")
+QLOO_API_KEY = os.getenv("QLOO_API_KEY")
+QLOO_URL = "https://api.qloo.com/v1/taste/recs"
+DB = "echoverse.db"
+
+def init_db():
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            pw_hash TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS prefs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            pref TEXT,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def fetch_taste_entities(preferences):
+    headers = {
+        "Authorization": f"Bearer {QLOO_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {"sample": preferences}
+    resp = requests.post(QLOO_URL, headers=headers, json=payload)
+    resp.raise_for_status()
+    data = resp.json()
+    return data.get("entities", [])
+
+@app.route("/", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        uname = request.form["username"]
+        pw = request.form["password"]
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        c.execute("SELECT id, pw_hash FROM users WHERE username = ?", (uname,))
+        row = c.fetchone()
+        conn.close()
+        if row and check_password_hash(row[1], pw):
+            session["user_id"] = row[0]
+            return redirect("/chat")
+        return render_template("login.html", error="Invalid credentials")
+    return render_template("login.html")
+
+@app.route("/register", methods=["POST"])
+def register():
+    uname = request.form["username"]
+    pw = request.form["password"]
+    pw_hash = generate_password_hash(pw)
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO users (username, pw_hash) VALUES (?, ?)", (uname, pw_hash))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return render_template("login.html", error="User exists")
+    conn.close()
+    return redirect("/")
+
+@app.route("/chat")
+def chat():
+    if "user_id" not in session:
+        return redirect("/")
+    return render_template("chat.html")
+
+@app.route("/submit", methods=["POST"])
+def submit():
+    if "user_id" not in session:
+        return jsonify(error="unauthenticated"), 401
+    uid = session["user_id"]
+    text = request.json.get("text", "").strip()
+    if not text:
+        return jsonify(error="No input text provided"), 400
+
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute("INSERT INTO prefs (user_id, pref) VALUES (?, ?)", (uid, text))
+    conn.commit()
+    conn.close()
+
+    try:
+        taste_ents = fetch_taste_entities([text])
+    except Exception as e:
+        return jsonify(error="Qloo API failed", detail=str(e)), 500
+
+    prompt = (
+        f"Preferences: {taste_ents}\n"
+        f"Memoir input cues: {text}\n"
+        "Produce a dreamy, reflective memoir snippet."
+    )
+
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are EchoVerse, an AI memoir writer."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            max_tokens=300
+        )
+        memoir = resp.choices[0].message.content
+    except Exception as e:
+        return jsonify(error="OpenAI API failed", detail=str(e)), 500
+
+    video_link = "https://example.com/generated_video.mp4"
+
+    return jsonify(memoir=memoir, video=video_link)
+
+if __name__ == "__main__":
+    app.run(debug=True)
