@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+  <body>
+    <h2>EchoVerse Chat</h2>
+    <div id="output"></div>
+    <input id="input" placeholder="Type something"/>
+    <button onclick="submitText()">Send</button>
+
+    <script>
+      async function submitText() {
+        const text = document.getElementById("input").value;
+        const resp = await fetch("/submit", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({ text })
+        });
+        const data = await resp.json();
+        if (data.error) {
+          alert(data.error + (data.detail ? "\n" + data.detail : ""));
+          return;
+        }
+        const out = document.getElementById("output");
+        out.innerHTML += `<p><strong>You:</strong> ${text}</p>`;
+        out.innerHTML += `<p><strong>EchoVerse:</strong> ${data.memoir}</p>`;
+        if (data.video) out.innerHTML += `<p><a href="${data.video}" target="_blank">Video (placeholder)</a></p>`;
+      }
+    </script>
+  </body>
+</html>
